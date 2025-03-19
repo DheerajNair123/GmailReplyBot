@@ -1,0 +1,265 @@
+/**
+ * Gmail Auto-Reply Script with Approval
+ * 
+ * This script finds emails matching criteria but waits for your approval before sending replies.
+ * To use:
+ * 1. Go to https://script.google.com/
+ * 2. Create a new project
+ * 3. Copy and paste this script
+ * 4. Customize the EMAIL_CRITERIA and AUTO_REPLY_TEXT
+ * 5. Save and run the findEmailsForApproval() function to see matching emails
+ * 6. Run sendApprovedReplies() when you're ready to send replies
+ */
+
+// CONFIGURATION - Customize these values
+const EMAIL_CRITERIA = {
+  // Set any of these to true/false or specific text to match
+  unread: true,
+  newer_than_days: 1,
+  from_contains: "", 
+  subject_contains: "", 
+  body_contains: "ha bhai", 
+  label: ""
+};
+
+// Your automated reply text
+const AUTO_REPLY_TEXT = `
+Hello,
+
+Thank you for your email. I've received your message and will get back to you within 24-48 hours.
+
+Best regards,
+Dheeraj Nair
+`;
+
+// Whether to mark emails as read after replying
+const MARK_AS_READ = true;
+
+// Whether to apply a label after replying
+const APPLY_LABEL = "Automated-Reply";
+const CREATE_LABEL_IF_NOT_EXISTS = true;
+
+// Label to use for pending approval
+const PENDING_APPROVAL_LABEL = "Pending-Auto-Reply";
+
+// Debug mode to show more information
+const DEBUG_MODE = true;
+
+/**
+ * Step 1: Find emails matching criteria and mark them for approval
+ */
+function findEmailsForApproval() {
+  // Create the pending approval label if it doesn't exist
+  let pendingLabel;
+  try {
+    pendingLabel = GmailApp.getUserLabelByName(PENDING_APPROVAL_LABEL);
+  } catch (e) {
+    // Label doesn't exist, create it
+    pendingLabel = GmailApp.createLabel(PENDING_APPROVAL_LABEL);
+  }
+  
+  // Build search query based on criteria
+  let searchQuery = "";
+  
+  if (EMAIL_CRITERIA.unread) {
+    searchQuery += "is:unread ";
+  }
+  
+  if (EMAIL_CRITERIA.newer_than_days) {
+    searchQuery += `newer_than:${EMAIL_CRITERIA.newer_than_days}d `;
+  }
+  
+  if (EMAIL_CRITERIA.from_contains && EMAIL_CRITERIA.from_contains.trim() !== "") {
+    searchQuery += `from:(${EMAIL_CRITERIA.from_contains.trim()}) `;
+  }
+  
+  if (EMAIL_CRITERIA.subject_contains && EMAIL_CRITERIA.subject_contains.trim() !== "") {
+    searchQuery += `subject:(${EMAIL_CRITERIA.subject_contains.trim()}) `;
+  }
+  
+  if (EMAIL_CRITERIA.label && EMAIL_CRITERIA.label.trim() !== "") {
+    searchQuery += `label:${EMAIL_CRITERIA.label.trim()} `;
+  }
+  
+  // Exclude emails already pending approval - fixed the label reference
+  searchQuery += `-label:${PENDING_APPROVAL_LABEL} `;
+  
+  // Log the search query for debugging
+  if (DEBUG_MODE) {
+    Logger.log("Search query: " + searchQuery);
+  }
+  
+  // Get threads matching the search criteria
+  const threads = GmailApp.search(searchQuery, 0, 50);
+  
+  if (DEBUG_MODE) {
+    Logger.log(`Found ${threads.length} threads matching search criteria`);
+  }
+  
+  let pendingCount = 0;
+  
+  // Process each thread
+  for (let i = 0; i < threads.length; i++) {
+    const thread = threads[i];
+    const messages = thread.getMessages();
+    const lastMessage = messages[messages.length - 1];
+    const lastMessageBody = lastMessage.getPlainBody();
+    const sender = lastMessage.getFrom();
+    const subject = lastMessage.getSubject();
+    
+    if (DEBUG_MODE) {
+      Logger.log(`Examining thread #${i+1}: From: ${sender}, Subject: ${subject}`);
+    }
+    
+    // Check if body matches criteria if specified
+    if (EMAIL_CRITERIA.body_contains && EMAIL_CRITERIA.body_contains.trim() !== "") {
+      if (!lastMessageBody.toLowerCase().includes(EMAIL_CRITERIA.body_contains.toLowerCase())) {
+        if (DEBUG_MODE) {
+          Logger.log(`- Skipping: Body does not contain "${EMAIL_CRITERIA.body_contains}"`);
+        }
+        continue;
+      }
+    }
+    
+    // Check if we've already replied to this thread
+    let alreadyReplied = false;
+    for (let j = 0; j < messages.length; j++) {
+      if (messages[j].getFrom().includes(Session.getActiveUser().getEmail())) {
+        alreadyReplied = true;
+        break;
+      }
+    }
+    
+    // Skip if we've already replied
+    if (alreadyReplied) {
+      if (DEBUG_MODE) {
+        Logger.log(`- Skipping: Already replied to this thread`);
+      }
+      continue;
+    }
+    
+    try {
+      // Mark this thread for approval
+      thread.addLabel(pendingLabel);
+      pendingCount++;
+      
+      if (DEBUG_MODE) {
+        Logger.log(`- Marked for approval: From: ${sender}, Subject: ${subject}`);
+      }
+    } catch (error) {
+      Logger.log(`ERROR adding label to email from ${sender}: ${error.toString()}`);
+    }
+  }
+  
+  // Log results
+  Logger.log(`Found ${pendingCount} new threads ready for approval.`);
+  Logger.log(`To review these emails in Gmail, search for label:${PENDING_APPROVAL_LABEL}`);
+  Logger.log(`After reviewing, run sendApprovedReplies() to send replies to these emails.`);
+}
+
+/**
+ * Step 2: Send replies to approved emails
+ */
+function sendApprovedReplies() {
+  // Get the approval label
+  let pendingLabel;
+  try {
+    pendingLabel = GmailApp.getUserLabelByName(PENDING_APPROVAL_LABEL);
+  } catch (e) {
+    Logger.log("No pending approval label found. Run findEmailsForApproval() first.");
+    return;
+  }
+  
+  // Get threads marked for approval
+  const threads = GmailApp.search(`label:${PENDING_APPROVAL_LABEL}`, 0, 50);
+  
+  Logger.log(`Found ${threads.length} threads marked for approval.`);
+  
+  // Create the auto-reply label if it doesn't exist
+  let replyLabel;
+  if (APPLY_LABEL) {
+    try {
+      replyLabel = GmailApp.getUserLabelByName(APPLY_LABEL);
+    } catch (e) {
+      if (CREATE_LABEL_IF_NOT_EXISTS) {
+        replyLabel = GmailApp.createLabel(APPLY_LABEL);
+      }
+    }
+  }
+  
+  let repliesCount = 0;
+  
+  // Send replies to each thread
+  for (let i = 0; i < threads.length; i++) {
+    const thread = threads[i];
+    const messages = thread.getMessages();
+    const lastMessage = messages[messages.length - 1];
+    const sender = lastMessage.getFrom();
+    const subject = lastMessage.getSubject();
+    
+    try {
+      // Reply to the thread
+      thread.reply(AUTO_REPLY_TEXT);
+      repliesCount++;
+      
+      if (DEBUG_MODE) {
+        Logger.log(`- Sent reply to: ${sender}, Subject: ${subject}`);
+      }
+      
+      // Mark as read if configured
+      if (MARK_AS_READ) {
+        thread.markRead();
+      }
+      
+      // Apply the auto-reply label
+      if (replyLabel) {
+        thread.addLabel(replyLabel);
+      }
+      
+      // Remove the pending approval label
+      thread.removeLabel(pendingLabel);
+      
+    } catch (error) {
+      Logger.log(`ERROR replying to email from ${sender}: ${error.toString()}`);
+    }
+  }
+  
+  // Log results
+  Logger.log(`Successfully sent ${repliesCount} auto-replies.`);
+}
+
+/**
+ * Function to get detailed information about all labels in the account
+ * This helps troubleshoot label-related issues
+ */
+function listAllLabels() {
+  const labels = GmailApp.getUserLabels();
+  Logger.log(`Found ${labels.length} labels in your Gmail account:`);
+  
+  for (let i = 0; i < labels.length; i++) {
+    const label = labels[i];
+    Logger.log(`${i+1}. Name: "${label.getName()}", ID: ${label.getId()}`);
+  }
+}
+
+/**
+ * Sets up time-driven triggers to automatically find emails for approval
+ */
+function setupAutomaticFinding() {
+  // Clear any existing triggers for finding emails
+  const triggers = ScriptApp.getProjectTriggers();
+  for (let i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === "findEmailsForApproval") {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+  
+  // Create a new trigger to run every 30 minutes
+  ScriptApp.newTrigger("findEmailsForApproval")
+    .timeBased()
+    .everyMinutes(30)
+    .create();
+  
+  Logger.log("Automatic email finding has been set up! The script will search for matching emails every 30 minutes.");
+  Logger.log("You'll still need to manually run sendApprovedReplies() when you're ready to send replies.");
+}
